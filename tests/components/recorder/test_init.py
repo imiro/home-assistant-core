@@ -1596,3 +1596,22 @@ async def test_async_block_till_done(hass, async_setup_recorder_instance):
     states = await instance.async_add_executor_job(_fetch_states)
     assert len(states) == 2
     await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize(
+    "dburl",
+    (
+        "mysql://user:password@SERVER_IP/DB_NAME",
+        "mysql+pymysql://user:password@SERVER_IP/DB_NAME",
+    ),
+)
+async def test_mysql_missing_utf8mb4(hass, dburl, caplog):
+    """Test recorder fails to setup if charset=utf8mb4 is missing from db_url."""
+    recorder_helper.async_initialize_recorder(hass)
+    assert not await async_setup_component(hass, DOMAIN, {DOMAIN: {CONF_DB_URL: dburl}})
+
+    assert (
+        "MySQL or MariaDB database connection URL must contain a 'charset=utf8mb4' "
+        "character set specifer. Please update the 'db_url' configuration option in "
+        "configuration.yaml"
+    ) in caplog.text
