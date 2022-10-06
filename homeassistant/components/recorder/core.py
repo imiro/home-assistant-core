@@ -58,7 +58,9 @@ from .db_schema import (
     Events,
     StateAttributes,
     States,
+    Statistics,
     StatisticsRuns,
+    StatisticsShortTerm,
 )
 from .executor import DBInterruptibleThreadPoolExecutor
 from .models import (
@@ -531,10 +533,13 @@ class Recorder(threading.Thread):
 
     @callback
     def async_import_statistics(
-        self, metadata: StatisticMetaData, stats: Iterable[StatisticData]
+        self,
+        metadata: StatisticMetaData,
+        stats: Iterable[StatisticData],
+        table: type[Statistics | StatisticsShortTerm],
     ) -> None:
         """Schedule import of statistics."""
-        self.queue_task(ImportStatisticsTask(metadata, stats))
+        self.queue_task(ImportStatisticsTask(metadata, stats, table))
 
     @callback
     def _async_setup_periodic_tasks(self) -> None:
@@ -1134,6 +1139,7 @@ class Recorder(threading.Thread):
 
         Base.metadata.create_all(self.engine)
         self._get_session = scoped_session(sessionmaker(bind=self.engine, future=True))
+        statistics.validate_db_schema(self)
         _LOGGER.debug("Connected to recorder database")
 
     def _close_connection(self) -> None:

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 import contextlib
 import dataclasses
 from datetime import datetime, timedelta
@@ -771,7 +771,7 @@ def _update_statistics(
 
 
 def _generate_get_metadata_stmt(
-    statistic_ids: list[str] | tuple[str] | None = None,
+    statistic_ids: list[str] | tuple[str, ...] | None = None,
     statistic_type: Literal["mean"] | Literal["sum"] | None = None,
     statistic_source: str | None = None,
 ) -> StatementLambdaElement:
@@ -792,7 +792,7 @@ def get_metadata_with_session(
     hass: HomeAssistant,
     session: Session,
     *,
-    statistic_ids: list[str] | tuple[str] | None = None,
+    statistic_ids: list[str] | tuple[str, ...] | None = None,
     statistic_type: Literal["mean"] | Literal["sum"] | None = None,
     statistic_source: str | None = None,
 ) -> dict[str, tuple[int, StatisticMetaData]]:
@@ -829,7 +829,7 @@ def get_metadata_with_session(
 def get_metadata(
     hass: HomeAssistant,
     *,
-    statistic_ids: list[str] | tuple[str] | None = None,
+    statistic_ids: list[str] | tuple[str, ...] | None = None,
     statistic_type: Literal["mean"] | Literal["sum"] | None = None,
     statistic_source: str | None = None,
 ) -> dict[str, tuple[int, StatisticMetaData]]:
@@ -877,7 +877,7 @@ def update_statistics_metadata(
 
 def list_statistic_ids(
     hass: HomeAssistant,
-    statistic_ids: list[str] | tuple[str] | None = None,
+    statistic_ids: list[str] | tuple[str, ...] | None = None,
     statistic_type: Literal["mean"] | Literal["sum"] | None = None,
 ) -> list[dict]:
     """Return all statistic_ids (or filtered one) and unit of measurement.
@@ -1087,7 +1087,7 @@ def statistics_during_period(
     hass: HomeAssistant,
     start_time: datetime,
     end_time: datetime | None = None,
-    statistic_ids: list[str] | None = None,
+    statistic_ids: list[str] | tuple[str, ...] | None = None,
     period: Literal["5minute", "day", "hour", "month"] = "hour",
     start_time_as_datetime: bool = False,
     units: dict[str, str] | None = None,
@@ -1341,7 +1341,7 @@ def _sorted_statistics_to_dict(
     hass: HomeAssistant,
     session: Session,
     stats: Iterable[Row],
-    statistic_ids: list[str] | None,
+    statistic_ids: list[str] | tuple[str, ...] | None,
     _metadata: dict[str, tuple[int, StatisticMetaData]],
     convert_units: bool,
     table: type[Statistics | StatisticsShortTerm],
@@ -1462,7 +1462,7 @@ def _async_import_statistics(
             statistic["last_reset"] = dt_util.as_utc(last_reset)
 
     # Insert job in recorder's queue
-    get_instance(hass).async_import_statistics(metadata, statistics)
+    get_instance(hass).async_import_statistics(metadata, statistics, Statistics)
 
 
 @callback
@@ -1552,6 +1552,7 @@ def import_statistics(
     instance: Recorder,
     metadata: StatisticMetaData,
     statistics: Iterable[StatisticData],
+    table: type[Statistics | StatisticsShortTerm],
 ) -> bool:
     """Process an import_statistics job."""
 
@@ -1565,11 +1566,11 @@ def import_statistics(
         metadata_id = _update_or_add_metadata(session, metadata, old_metadata_dict)
         for stat in statistics:
             if stat_id := _statistics_exists(
-                session, Statistics, metadata_id, stat["start"]
+                session, table, metadata_id, stat["start"]
             ):
-                _update_statistics(session, Statistics, stat_id, stat)
+                _update_statistics(session, table, stat_id, stat)
             else:
-                _insert_statistics(session, Statistics, metadata_id, stat)
+                _insert_statistics(session, table, metadata_id, stat)
 
     return True
 
@@ -1690,3 +1691,95 @@ def async_change_statistics_unit(
         new_unit_of_measurement=new_unit_of_measurement,
         old_unit_of_measurement=old_unit_of_measurement,
     )
+
+
+def validate_db_schema(instance: Recorder) -> None:
+    """Do some basic checks for common schema errors caused by manual migration."""
+    # This name can't be represented unless 4-byte UTF-8 unicode is supported
+    name = "𓆚𓃗"
+    # This number can't be accurately represented as a float
+    precise_number = 1.000000000000001
+    # This time can't be represented unless datetimes have µs precision
+    precise_time = datetime(2020, 10, 6, microsecond=1, tzinfo=dt_util.UTC)
+
+    statistic_id = f"{DOMAIN}.db_test"
+
+    metadata: StatisticMetaData = {
+        "has_mean": True,
+        "has_sum": True,
+        "name": name,
+        "source": DOMAIN,
+        "statistic_id": statistic_id,
+        "unit_of_measurement": None,
+    }
+    statistics: StatisticData = {
+        "last_reset": precise_time,
+        "max": precise_number,
+        "mean": precise_number,
+        "min": precise_number,
+        "start": precise_time,
+        "state": precise_number,
+        "sum": precise_number,
+    }
+
+    def check_columns(
+        stored: Mapping,
+        expected: Mapping,
+        columns: tuple[str, ...],
+        table_name: str,
+        supports: str,
+    ) -> None:
+        for column in columns:
+            if stored[column] != expected[column]:
+                _LOGGER.warning(
+                    "Column %s in database table %s does not support %s (%s != %s)",
+                    column,
+                    table_name,
+                    supports,
+                    stored[column],
+                    expected[column],
+                )
+
+    # Insert / adjust a test statistics row
+    tables: tuple[type[Statistics | StatisticsShortTerm], ...] = (
+        Statistics,
+        StatisticsShortTerm,
+    )
+    for table in tables:
+        import_statistics(instance, metadata, [statistics], table)
+
+        stored_metadatas = get_metadata(instance.hass, statistic_ids=(statistic_id,))
+        if stored_metadata := stored_metadatas.get(statistic_id):
+            check_columns(
+                stored_metadata[1],
+                metadata,
+                ("name",),
+                table.__tablename__,
+                "4-byte UTF-8",
+            )
+
+        stored_statistics = statistics_during_period(
+            instance.hass,
+            period="5minute",
+            start_time=precise_time,
+            statistic_ids=(statistic_id,),
+        )
+        if stored_statistic := stored_statistics.get(statistic_id):
+            check_columns(
+                stored_statistic[0],
+                statistics,
+                ("max", "mean", "min", "state", "sum"),
+                table.__tablename__,
+                "double precision",
+            )
+            assert statistics["last_reset"]
+            check_columns(
+                stored_statistic[0],
+                {
+                    "last_reset": statistics["last_reset"].isoformat(),
+                    "start": statistics["start"].isoformat(),
+                },
+                ("start", "last_reset"),
+                table.__tablename__,
+                "µs precision",
+            )
