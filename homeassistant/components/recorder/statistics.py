@@ -844,7 +844,9 @@ def get_metadata(
         )
 
 
-def clear_statistics(instance: Recorder, statistic_ids: list[str]) -> None:
+def clear_statistics(
+    instance: Recorder, statistic_ids: list[str] | tuple[str, ...]
+) -> None:
     """Clear statistics for a list of statistic_ids."""
     with session_scope(session=instance.get_session()) as session:
         session.query(StatisticsMeta).filter(
@@ -1746,7 +1748,7 @@ def validate_db_schema(instance: Recorder) -> None:
         StatisticsShortTerm,
     )
     for table in tables:
-        import_statistics(instance, metadata, [statistics], table)
+        import_statistics(instance, metadata, (statistics,), table)
 
         stored_metadatas = get_metadata(instance.hass, statistic_ids=(statistic_id,))
         if stored_metadata := stored_metadatas.get(statistic_id):
@@ -1783,3 +1785,4 @@ def validate_db_schema(instance: Recorder) -> None:
                 table.__tablename__,
                 "µs precision",
             )
+    clear_statistics(instance, statistic_ids=(statistic_id,))
